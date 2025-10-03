@@ -50,15 +50,25 @@ Edit `src/pin_config.h` (lines 3-4):
 Edit `src/main.cpp` (lines 14-17):
 ```cpp
 #define OPENWEATHER_API_KEY "YOUR_API_KEY_HERE"
-#define CITY_NAME "YourCity"
-#define STATE_CODE "YourState"  // For US locations
-#define COUNTRY_CODE "US"
+#define LATITUDE "YOUR_LATITUDE"
+#define LONGITUDE "YOUR_LONGITUDE"
 ```
 
+**How to find your coordinates:**
+1. Go to [Google Maps](https://maps.google.com)
+2. Right-click on your location
+3. Click on the coordinates to copy them
+4. Or use [LatLong.net](https://www.latlong.net/)
+
 **Examples**:
-- `"Seattle", "WA", "US"`
-- `"London", "", "UK"` (leave STATE_CODE empty for non-US)
-- `"Tokyo", "", "JP"`
+- Seattle, WA: `"47.6062", "-122.3321"`
+- London, UK: `"51.5074", "-0.1278"`
+- Tokyo, Japan: `"35.6762", "139.6503"`
+
+**Why coordinates?**
+- More accurate than city names, especially for small towns
+- No ambiguity (many cities share the same name)
+- Better data quality from OpenWeatherMap
 
 ## Step 4: Connect and Upload
 
@@ -135,9 +145,10 @@ Press `Ctrl+C` to exit the monitor.
 - Press RESET button on device
 
 ### Wrong location weather
-- Verify `CITY_NAME`, `STATE_CODE`, `COUNTRY_CODE` in main.cpp
-- Use exact city spelling
-- Check OpenWeatherMap has data for your city
+- Double-check `LATITUDE` and `LONGITUDE` in main.cpp
+- Make sure coordinates use decimal format (not degrees/minutes/seconds)
+- Use negative values for West longitude and South latitude
+- Test your coordinates at https://www.openweathermap.org/weathermap
 
 ### Compile errors
 - Make sure you changed BOTH files:
@@ -180,4 +191,5 @@ Once it's working:
 ---
 
 **Enjoy your weather station!** 🌤️
+
 

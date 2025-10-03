@@ -65,14 +65,21 @@ Edit `src/pin_config.h` and update these lines:
 #define WIFI_PASSWORD    "YOUR_WIFI_PASSWORD"
 ```
 
-Edit `src/main.cpp` and update the API key (line 11):
+Edit `src/main.cpp` and update the API key and location (lines 14-17):
+
+**Using Coordinates (Recommended for accuracy):**
 
 ```cpp
 #define OPENWEATHER_API_KEY "YOUR_API_KEY_HERE"
-#define CITY_NAME "YourCity"
-#define STATE_CODE "YourState"
-#define COUNTRY_CODE "US"
+#define LATITUDE "47.4771"   // Your latitude
+#define LONGITUDE "-118.2472" // Your longitude
 ```
+
+To find your coordinates:
+- Go to [Google Maps](https://maps.google.com)
+- Right-click your location
+- Copy the latitude and longitude values
+- Or use: https://www.latlong.net/
 
 ### 4. Upload to Device
 
@@ -120,13 +127,17 @@ Switch between Fahrenheit and Celsius (line 15 in `main.cpp`):
 
 ### Location
 
-Update your city (lines 12-14 in `main.cpp`):
+The project uses **GPS coordinates** for precise weather data. Update your coordinates in `main.cpp` (lines 16-17):
 
 ```cpp
-#define CITY_NAME "YourCity"
-#define STATE_CODE "YourState"  // US only
-#define COUNTRY_CODE "US"
+#define LATITUDE "YOUR_LATITUDE"
+#define LONGITUDE "YOUR_LONGITUDE"
 ```
+
+**Why coordinates instead of city names?**
+- More accurate, especially for small towns
+- Avoids ambiguity (multiple cities with same name)
+- Consistent data quality from OpenWeatherMap
 
 ## Display Details
 
@@ -188,11 +199,18 @@ Update your city (lines 12-14 in `main.cpp`):
 - **Backlight**: GPIO38
 - **Power**: GPIO15
 
-### API Endpoint
-Uses OpenWeatherMap's 5-day/3-hour forecast API:
-```
-http://api.openweathermap.org/data/2.5/forecast
-```
+### API Endpoints
+Uses two OpenWeatherMap APIs for comprehensive data:
+1. **Current Weather API** - Real-time conditions
+   ```
+   http://api.openweathermap.org/data/2.5/weather
+   ```
+2. **5-Day Forecast API** - 3-hour interval forecasts
+   ```
+   http://api.openweathermap.org/data/2.5/forecast
+   ```
+
+Both use latitude/longitude for precise location targeting.
 
 ### Memory Usage
 - **RAM**: ~19KB (6% of 327KB)
@@ -231,7 +249,14 @@ This project is open source and available under the MIT License.
 
 ## Changelog
 
-### v1.0.0 (Current)
+### v1.1.0 (Current)
+- **Fixed**: Coordinate-based location for precise weather data
+- **Fixed**: Proper calendar-day grouping for forecasts
+- **Fixed**: Current temperature now uses forecast API (more reliable for small towns)
+- **Improved**: Better handling of late-day scenarios (no forecast data remaining)
+- **Added**: Location verification in serial output
+
+### v1.0.0
 - Initial release
 - Current temperature and conditions display
 - 3-day forecast with high/low temps

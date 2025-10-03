@@ -12,9 +12,10 @@
 // OpenWeatherMap API Configuration
 // Get your free API key from: https://openweathermap.org/api
 #define OPENWEATHER_API_KEY "YOUR_API_KEY_HERE"
-#define CITY_NAME "YourCity"
-#define STATE_CODE "YourState"
-#define COUNTRY_CODE "US"
+// Using coordinates for precise location (more accurate than city names)
+// Find yours at: https://www.latlong.net or Google Maps (right-click location)
+#define LATITUDE "YOUR_LATITUDE"
+#define LONGITUDE "YOUR_LONGITUDE"
 #define UNITS "imperial"
 #define UPDATE_INTERVAL_MS (30 * 60 * 1000)
 
@@ -357,17 +358,56 @@ bool fetchWeatherData() {
     if (WiFi.status() != WL_CONNECTED) return false;
     
     HTTPClient http;
-    String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + 
-                 String(CITY_NAME) + "," + String(STATE_CODE) + "," + String(COUNTRY_CODE) +
-                 "&appid=" + String(OPENWEATHER_API_KEY) + 
-                 "&units=" + String(UNITS) + "&cnt=24";
     
-    Serial.println("Fetching weather...");
-    http.begin(url);
+    // STEP 1: Get ACTUAL current weather using coordinates
+    String currentUrl = "http://api.openweathermap.org/data/2.5/weather?lat=" + 
+                        String(LATITUDE) + "&lon=" + String(LONGITUDE) +
+                        "&appid=" + String(OPENWEATHER_API_KEY) + 
+                        "&units=" + String(UNITS);
+    
+    Serial.println("Fetching current weather...");
+    http.begin(currentUrl);
     int httpCode = http.GET();
     
     if (httpCode != 200) {
-        Serial.printf("HTTP error: %d\n", httpCode);
+        Serial.printf("Current weather HTTP error: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+    
+    String currentPayload = http.getString();
+    http.end();
+    
+    JsonDocument currentDoc;
+    DeserializationError error = deserializeJson(currentDoc, currentPayload);
+    
+    if (error) {
+        Serial.print("Current weather JSON error: ");
+        Serial.println(error.c_str());
+        return false;
+    }
+    
+    // Get location name returned by API to verify we have the right place
+    String locationName = currentDoc["name"].as<String>();
+    Serial.printf("Location: %s\n", locationName.c_str());
+    
+    // Get current conditions (but we'll use forecast temp instead)
+    currentCondition = currentDoc["weather"][0]["description"].as<String>();
+    
+    Serial.printf("Current Weather API conditions: %s\n", currentCondition.c_str());
+    
+    // STEP 2: Get forecast data using coordinates
+    String forecastUrl = "http://api.openweathermap.org/data/2.5/forecast?lat=" + 
+                         String(LATITUDE) + "&lon=" + String(LONGITUDE) +
+                         "&appid=" + String(OPENWEATHER_API_KEY) + 
+                         "&units=" + String(UNITS) + "&cnt=40";  // Get 5 days worth
+    
+    Serial.println("Fetching forecast...");
+    http.begin(forecastUrl);
+    httpCode = http.GET();
+    
+    if (httpCode != 200) {
+        Serial.printf("Forecast HTTP error: %d\n", httpCode);
         http.end();
         return false;
     }
@@ -376,60 +416,108 @@ bool fetchWeatherData() {
     http.end();
     
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    error = deserializeJson(doc, payload);
     
     if (error) {
-        Serial.print("JSON error: ");
+        Serial.print("Forecast JSON error: ");
         Serial.println(error.c_str());
         return false;
     }
     
-    // Get current temperature and conditions from first entry
-    currentTemp = round(doc["list"][0]["main"]["temp"].as<float>());
-    currentCondition = doc["list"][0]["weather"][0]["description"].as<String>();
-    Serial.printf("Current: %dF, %s\n", currentTemp, currentCondition.c_str());
+    // Get the first forecast entry temperature (most recent/next 3-hour block)
+    int firstForecastTemp = round(doc["list"][0]["main"]["temp"].as<float>());
+    Serial.printf("First Forecast Entry: %dF\n", firstForecastTemp);
     
-    // Extract 3-day forecast by finding min/max temps across all forecasts for each day
-    for (int day = 0; day < 3; day++) {
-        int start_index = day * 8;  // Each day has ~8 3-hour forecasts
-        int end_index = (day + 1) * 8;
-        if (end_index > doc["list"].size()) end_index = doc["list"].size();
+    // Use the forecast temperature if it's more recent (for small towns, forecast is more reliable)
+    currentTemp = firstForecastTemp;
+    
+    // Process forecast data - group by actual calendar date
+    Serial.println("Processing forecast by calendar date...");
+    
+    // Get current date to properly group forecasts
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    char currentDate[11];
+    strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", timeinfo);
+    
+    // Arrays to hold min/max for each of 3 days
+    float dayHighs[3] = {-999, -999, -999};
+    float dayLows[3] = {999, 999, 999};
+    String dayDescriptions[3] = {"", "", ""};
+    String dayDates[3] = {"", "", ""};
+    int dayHumiditySums[3] = {0, 0, 0};
+    int dayHumidityCounts[3] = {0, 0, 0};
+    
+    // Process all forecast entries and group by date
+    int listSize = doc["list"].size();
+    for (int i = 0; i < listSize; i++) {
+        JsonObject item = doc["list"][i];
+        String dt_txt = item["dt_txt"].as<String>();  // Format: "YYYY-MM-DD HH:MM:SS"
+        String forecastDate = dt_txt.substring(0, 10);  // Extract "YYYY-MM-DD"
+        String forecastTime = dt_txt.substring(11, 16); // Extract "HH:MM"
         
-        float temp_high = -999;
-        float temp_low = 999;
-        int total_humidity = 0;
-        int humidity_count = 0;
-        String description = "";
+        // Determine which day this forecast belongs to (0=today, 1=tomorrow, 2=day after)
+        int dayIndex = -1;
         
-        // Find the actual high/low across all time periods for this day
-        for (int i = start_index; i < end_index && i < doc["list"].size(); i++) {
-            JsonObject item = doc["list"][i];
-            float temp = item["main"]["temp"].as<float>();
-            
-            if (temp > temp_high) {
-                temp_high = temp;
-            }
-            if (temp < temp_low) {
-                temp_low = temp;
-            }
-            
-            total_humidity += item["main"]["humidity"].as<int>();
-            humidity_count++;
-            
-            // Use midday description (around index 4 of the day)
-            if (i == start_index + 4 || description == "") {
-                description = item["weather"][0]["description"].as<String>();
-                forecast[day].date = item["dt_txt"].as<String>().substring(5, 10);
-            }
+        // Compare dates to determine day index
+        if (forecastDate == currentDate) {
+            dayIndex = 0;  // Today
+        } else if (dayDates[1] == "" || forecastDate == dayDates[1]) {
+            dayIndex = 1;  // Tomorrow
+            if (dayDates[1] == "") dayDates[1] = forecastDate;
+        } else if (dayDates[2] == "" || forecastDate == dayDates[2]) {
+            dayIndex = 2;  // Day after tomorrow
+            if (dayDates[2] == "") dayDates[2] = forecastDate;
+        } else if (dayIndex == -1) {
+            continue;  // Skip if beyond 3 days
         }
         
-        forecast[day].day_name = getDayName(day);
-        forecast[day].description = description;
-        forecast[day].temp_high = round(temp_high);
-        forecast[day].temp_low = round(temp_low);
-        forecast[day].humidity = humidity_count > 0 ? total_humidity / humidity_count : 0;
+        // Store date for this day
+        if (dayDates[dayIndex] == "") {
+            dayDates[dayIndex] = forecastDate;
+        }
         
-        Serial.printf("Day %d: %s %s, %d-%dF, %s\n", 
+        // Get temperature and update min/max
+        float temp = item["main"]["temp"].as<float>();
+        if (temp > dayHighs[dayIndex]) {
+            dayHighs[dayIndex] = temp;
+        }
+        if (temp < dayLows[dayIndex]) {
+            dayLows[dayIndex] = temp;
+        }
+        
+        // Accumulate humidity
+        dayHumiditySums[dayIndex] += item["main"]["humidity"].as<int>();
+        dayHumidityCounts[dayIndex]++;
+        
+        // Use midday description (12:00-15:00 preferred)
+        if (dayDescriptions[dayIndex] == "" || 
+            (forecastTime >= "12:00" && forecastTime <= "15:00")) {
+            dayDescriptions[dayIndex] = item["weather"][0]["description"].as<String>();
+        }
+    }
+    
+    // Populate forecast array with processed data
+    dayDates[0] = currentDate;  // Ensure today is set
+    for (int day = 0; day < 3; day++) {
+        forecast[day].day_name = getDayName(day);
+        forecast[day].date = dayDates[day].substring(5, 10);  // "MM-DD"
+        forecast[day].description = dayDescriptions[day];
+        
+        // Don't show high/low if we don't have forecast data (late in the day)
+        if (dayHighs[day] <= -999 || dayLows[day] >= 999) {
+            Serial.printf("No forecast data remaining for day %d\n", day);
+            forecast[day].temp_high = 0;
+            forecast[day].temp_low = 0;
+        } else {
+            forecast[day].temp_high = round(dayHighs[day]);
+            forecast[day].temp_low = round(dayLows[day]);
+        }
+        
+        forecast[day].humidity = dayHumidityCounts[day] > 0 ? 
+                                 dayHumiditySums[day] / dayHumidityCounts[day] : 0;
+        
+        Serial.printf("Day %d: %s %s, %d/%dF, %s\n", 
                      day, forecast[day].day_name.c_str(), forecast[day].date.c_str(),
                      forecast[day].temp_low, forecast[day].temp_high,
                      forecast[day].description.c_str());
