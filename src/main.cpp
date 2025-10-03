@@ -1,0 +1,448 @@
+#include "Arduino.h"
+#include "WiFi.h"
+#include "HTTPClient.h"
+#include "ArduinoJson.h"
+#include "lvgl.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_vendor.h"
+#include "pin_config.h"
+#include <time.h>
+
+// OpenWeatherMap API Configuration
+// Get your free API key from: https://openweathermap.org/api
+#define OPENWEATHER_API_KEY "YOUR_API_KEY_HERE"
+#define CITY_NAME "YourCity"
+#define STATE_CODE "YourState"
+#define COUNTRY_CODE "US"
+#define UNITS "imperial"
+#define UPDATE_INTERVAL_MS (30 * 60 * 1000)
+
+// Display handles
+esp_lcd_panel_io_handle_t io_handle = NULL;
+esp_lcd_panel_handle_t panel_handle = NULL;
+static lv_disp_draw_buf_t disp_buf;
+static lv_disp_drv_t disp_drv;
+static lv_color_t *lv_disp_buf;
+static bool is_initialized_lvgl = false;
+
+// Weather data
+struct WeatherDay {
+    String date;
+    String day_name;
+    String description;
+    int temp_high;
+    int temp_low;
+    int humidity;
+};
+
+WeatherDay forecast[3];
+int currentTemp = 0;  // Current temperature for Day 0
+String currentCondition = "";  // Current weather condition for Day 0
+unsigned long lastUpdate = 0;
+bool weatherDataValid = false;
+
+// LVGL UI objects
+lv_obj_t *screen;
+lv_obj_t *title_label;
+lv_obj_t *day_labels[3];
+lv_obj_t *temp_labels[3];
+lv_obj_t *desc_labels[3];
+lv_obj_t *update_label;
+
+// LCD commands
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[14];
+    uint8_t len;
+} lcd_cmd_t;
+
+lcd_cmd_t lcd_st7789v[] = {
+    {0x11, {0}, 0 | 0x80},
+    {0x3A, {0X05}, 1},
+    {0xB2, {0X0B, 0X0B, 0X00, 0X33, 0X33}, 5},
+    {0xB7, {0X75}, 1},
+    {0xBB, {0X28}, 1},
+    {0xC0, {0X2C}, 1},
+    {0xC2, {0X01}, 1},
+    {0xC3, {0X1F}, 1},
+    {0xC6, {0X13}, 1},
+    {0xD0, {0XA7}, 1},
+    {0xD0, {0XA4, 0XA1}, 2},
+    {0xD6, {0XA1}, 1},
+    {0xE0, {0XF0, 0X05, 0X0A, 0X06, 0X06, 0X03, 0X2B, 0X32, 0X43, 0X36, 0X11, 0X10, 0X2B, 0X32}, 14},
+    {0xE1, {0XF0, 0X08, 0X0C, 0X0B, 0X09, 0X24, 0X2B, 0X22, 0X43, 0X38, 0X15, 0X16, 0X2F, 0X37}, 14},
+};
+
+// Function declarations
+void initDisplay();
+bool connectToWiFi();
+bool fetchWeatherData();
+void createUI();
+void updateWeatherDisplay();
+String getDayName(int dayOffset);
+static bool lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
+static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map);
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+    
+    Serial.println("Weather Station Starting...");
+    
+    // Power on display
+    pinMode(PIN_POWER_ON, OUTPUT);
+    digitalWrite(PIN_POWER_ON, HIGH);
+    delay(100);
+    
+    // Initialize display and LVGL
+    initDisplay();
+    
+    // Create UI
+    createUI();
+    
+    lv_label_set_text(title_label, "Connecting WiFi...");
+    lv_timer_handler();
+    
+    // Connect to WiFi
+    if (connectToWiFi()) {
+        Serial.println("WiFi connected!");
+        lv_label_set_text(title_label, "Fetching Weather...");
+        lv_timer_handler();
+        delay(1000);
+        
+        // Fetch weather
+        if (fetchWeatherData()) {
+            weatherDataValid = true;
+            updateWeatherDisplay();
+        } else {
+            lv_label_set_text(title_label, "Weather Fetch Failed");
+        }
+    } else {
+        lv_label_set_text(title_label, "WiFi Failed!");
+    }
+    
+    // Turn on backlight
+    pinMode(PIN_LCD_BL, OUTPUT);
+    digitalWrite(PIN_LCD_BL, HIGH);
+}
+
+void loop() {
+    lv_timer_handler();
+    delay(5);
+    
+    // Update weather every 30 minutes
+    if (weatherDataValid && millis() - lastUpdate > UPDATE_INTERVAL_MS) {
+        if (fetchWeatherData()) {
+            updateWeatherDisplay();
+        }
+    }
+}
+
+static bool lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
+    if (is_initialized_lvgl) {
+        lv_disp_drv_t *disp_driver = (lv_disp_drv_t *)user_ctx;
+        lv_disp_flush_ready(disp_driver);
+    }
+    return false;
+}
+
+static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map) {
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
+    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_map);
+}
+
+void initDisplay() {
+    pinMode(PIN_LCD_RD, OUTPUT);
+    digitalWrite(PIN_LCD_RD, HIGH);
+    
+    // Initialize I80 bus
+    esp_lcd_i80_bus_handle_t i80_bus = NULL;
+    esp_lcd_i80_bus_config_t bus_config = {
+        .dc_gpio_num = PIN_LCD_DC,
+        .wr_gpio_num = PIN_LCD_WR,
+        .clk_src = LCD_CLK_SRC_PLL160M,
+        .data_gpio_nums = {
+            PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3,
+            PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7,
+        },
+        .bus_width = 8,
+        .max_transfer_bytes = LVGL_LCD_BUF_SIZE * sizeof(uint16_t),
+        .psram_trans_align = 0,
+        .sram_trans_align = 0
+    };
+    esp_lcd_new_i80_bus(&bus_config, &i80_bus);
+    
+    // Initialize panel IO
+    esp_lcd_panel_io_i80_config_t io_config = {
+        .cs_gpio_num = PIN_LCD_CS,
+        .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
+        .trans_queue_depth = 20,
+        .on_color_trans_done = lvgl_flush_ready,
+        .user_ctx = &disp_drv,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .dc_levels = {
+            .dc_idle_level = 0,
+            .dc_cmd_level = 0,
+            .dc_dummy_level = 0,
+            .dc_data_level = 1,
+        },
+    };
+    esp_lcd_new_panel_io_i80(i80_bus, &io_config, &io_handle);
+    
+    // Initialize panel
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = PIN_LCD_RES,
+        .color_space = ESP_LCD_COLOR_SPACE_RGB,
+        .bits_per_pixel = 16,
+    };
+    esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle);
+    esp_lcd_panel_reset(panel_handle);
+    esp_lcd_panel_init(panel_handle);
+    esp_lcd_panel_invert_color(panel_handle, true);
+    esp_lcd_panel_swap_xy(panel_handle, true);
+    esp_lcd_panel_mirror(panel_handle, false, true);
+    esp_lcd_panel_set_gap(panel_handle, 0, 35);
+    
+    // Send ST7789 specific commands
+    for (uint8_t i = 0; i < (sizeof(lcd_st7789v) / sizeof(lcd_cmd_t)); i++) {
+        esp_lcd_panel_io_tx_param(io_handle, lcd_st7789v[i].cmd, lcd_st7789v[i].data, lcd_st7789v[i].len & 0x7f);
+        if (lcd_st7789v[i].len & 0x80) delay(120);
+    }
+    
+    // Initialize LVGL
+    lv_init();
+    lv_disp_buf = (lv_color_t *)heap_caps_malloc(LVGL_LCD_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    lv_disp_draw_buf_init(&disp_buf, lv_disp_buf, NULL, LVGL_LCD_BUF_SIZE);
+    
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
+    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
+    disp_drv.flush_cb = lvgl_flush_cb;
+    disp_drv.draw_buf = &disp_buf;
+    disp_drv.user_data = panel_handle;
+    lv_disp_drv_register(&disp_drv);
+    
+    is_initialized_lvgl = true;
+}
+
+void createUI() {
+    screen = lv_scr_act();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
+    
+    // Title (used for status messages during startup)
+    title_label = lv_label_create(screen);
+    lv_label_set_text(title_label, "Weather Station");
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0x00FFFF), 0);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, 0);
+    
+    // Create 3 horizontal weather tiles
+    int tile_width = 100;
+    int tile_spacing = 6;
+    int start_x = (320 - (tile_width * 3 + tile_spacing * 2)) / 2;
+    
+    for (int i = 0; i < 3; i++) {
+        int x_pos = start_x + (i * (tile_width + tile_spacing));
+        
+        // Day name label (at top of tile)
+        day_labels[i] = lv_label_create(screen);
+        lv_obj_set_style_text_color(day_labels[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(day_labels[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_pos(day_labels[i], x_pos, 10);
+        lv_obj_set_width(day_labels[i], tile_width);
+        lv_obj_set_style_text_align(day_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        
+        // Temperature label (LARGE, moved down slightly)
+        temp_labels[i] = lv_label_create(screen);
+        lv_obj_set_style_text_color(temp_labels[i], lv_color_hex(0xFFFF00), 0);
+        lv_obj_set_style_text_font(temp_labels[i], &lv_font_montserrat_24, 0);
+        lv_obj_set_pos(temp_labels[i], x_pos, 65);
+        lv_obj_set_width(temp_labels[i], tile_width);
+        lv_obj_set_style_text_align(temp_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        
+        // Description label (near bottom, multi-line, size 18)
+        desc_labels[i] = lv_label_create(screen);
+        lv_obj_set_style_text_color(desc_labels[i], lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(desc_labels[i], &lv_font_montserrat_18, 0);
+        lv_obj_set_pos(desc_labels[i], x_pos, 120);
+        lv_obj_set_width(desc_labels[i], tile_width);
+        lv_obj_set_style_text_align(desc_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(desc_labels[i], LV_LABEL_LONG_WRAP);
+    }
+    
+    // Update label - initially hidden, will be used for status messages
+    update_label = lv_label_create(screen);
+    lv_obj_set_style_text_color(update_label, lv_color_hex(0x00FF00), 0);
+    lv_obj_set_style_text_font(update_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(update_label, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_obj_add_flag(update_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+void updateWeatherDisplay() {
+    // Hide startup message
+    lv_obj_add_flag(title_label, LV_OBJ_FLAG_HIDDEN);
+    
+    // Check if data is stale (older than 2 hours)
+    bool isStale = (millis() - lastUpdate) > (2 * 60 * 60 * 1000);
+    
+    for (int i = 0; i < 3; i++) {
+        // Day 0: Show current temp instead of day/date
+        // Days 1-2: Show day name and date
+        if (i == 0) {
+            // Current temperature displayed where day/date usually goes
+            String current_text = String(currentTemp) + "F";
+            lv_label_set_text(day_labels[i], current_text.c_str());
+            lv_obj_set_style_text_color(day_labels[i], lv_color_hex(0x00FFFF), 0); // Cyan for current
+            lv_obj_set_style_text_font(day_labels[i], &lv_font_montserrat_26, 0); // Larger than temps
+        } else {
+            // Normal day/date display
+            String day_text = forecast[i].day_name + "\n" + forecast[i].date;
+            lv_label_set_text(day_labels[i], day_text.c_str());
+            lv_obj_set_style_text_color(day_labels[i], lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_text_font(day_labels[i], &lv_font_montserrat_12, 0);
+        }
+        
+        // Temperature with red asterisk if stale
+        String temp_text;
+        if (isStale) {
+            temp_text = "*" + String(forecast[i].temp_high) + "/" + String(forecast[i].temp_low) + "F";
+            lv_obj_set_style_text_color(temp_labels[i], lv_color_hex(0xFF0000), 0); // Red when stale
+        } else {
+            temp_text = String(forecast[i].temp_high) + "/" + String(forecast[i].temp_low) + "F";
+            lv_obj_set_style_text_color(temp_labels[i], lv_color_hex(0xFFFF00), 0); // Yellow when fresh
+        }
+        lv_label_set_text(temp_labels[i], temp_text.c_str());
+        
+        // Description
+        String desc;
+        if (i == 0) {
+            // Day 0: Show current conditions in cyan
+            desc = currentCondition;
+            if (desc.length() > 0) {
+                desc[0] = toupper(desc[0]);
+            }
+            lv_label_set_text(desc_labels[i], desc.c_str());
+            lv_obj_set_style_text_color(desc_labels[i], lv_color_hex(0x00FFFF), 0); // Cyan to match current temp
+        } else {
+            // Days 1-2: Show forecast in gray
+            desc = forecast[i].description;
+            if (desc.length() > 0) {
+                desc[0] = toupper(desc[0]);
+            }
+            lv_label_set_text(desc_labels[i], desc.c_str());
+            lv_obj_set_style_text_color(desc_labels[i], lv_color_hex(0xAAAAAA), 0); // Gray
+        }
+    }
+}
+
+bool connectToWiFi() {
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    return (WiFi.status() == WL_CONNECTED);
+}
+
+bool fetchWeatherData() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    
+    HTTPClient http;
+    String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + 
+                 String(CITY_NAME) + "," + String(STATE_CODE) + "," + String(COUNTRY_CODE) +
+                 "&appid=" + String(OPENWEATHER_API_KEY) + 
+                 "&units=" + String(UNITS) + "&cnt=24";
+    
+    Serial.println("Fetching weather...");
+    http.begin(url);
+    int httpCode = http.GET();
+    
+    if (httpCode != 200) {
+        Serial.printf("HTTP error: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+    
+    String payload = http.getString();
+    http.end();
+    
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (error) {
+        Serial.print("JSON error: ");
+        Serial.println(error.c_str());
+        return false;
+    }
+    
+    // Get current temperature and conditions from first entry
+    currentTemp = round(doc["list"][0]["main"]["temp"].as<float>());
+    currentCondition = doc["list"][0]["weather"][0]["description"].as<String>();
+    Serial.printf("Current: %dF, %s\n", currentTemp, currentCondition.c_str());
+    
+    // Extract 3-day forecast by finding min/max temps across all forecasts for each day
+    for (int day = 0; day < 3; day++) {
+        int start_index = day * 8;  // Each day has ~8 3-hour forecasts
+        int end_index = (day + 1) * 8;
+        if (end_index > doc["list"].size()) end_index = doc["list"].size();
+        
+        float temp_high = -999;
+        float temp_low = 999;
+        int total_humidity = 0;
+        int humidity_count = 0;
+        String description = "";
+        
+        // Find the actual high/low across all time periods for this day
+        for (int i = start_index; i < end_index && i < doc["list"].size(); i++) {
+            JsonObject item = doc["list"][i];
+            float temp = item["main"]["temp"].as<float>();
+            
+            if (temp > temp_high) {
+                temp_high = temp;
+            }
+            if (temp < temp_low) {
+                temp_low = temp;
+            }
+            
+            total_humidity += item["main"]["humidity"].as<int>();
+            humidity_count++;
+            
+            // Use midday description (around index 4 of the day)
+            if (i == start_index + 4 || description == "") {
+                description = item["weather"][0]["description"].as<String>();
+                forecast[day].date = item["dt_txt"].as<String>().substring(5, 10);
+            }
+        }
+        
+        forecast[day].day_name = getDayName(day);
+        forecast[day].description = description;
+        forecast[day].temp_high = round(temp_high);
+        forecast[day].temp_low = round(temp_low);
+        forecast[day].humidity = humidity_count > 0 ? total_humidity / humidity_count : 0;
+        
+        Serial.printf("Day %d: %s %s, %d-%dF, %s\n", 
+                     day, forecast[day].day_name.c_str(), forecast[day].date.c_str(),
+                     forecast[day].temp_low, forecast[day].temp_high,
+                     forecast[day].description.c_str());
+    }
+    
+    lastUpdate = millis();
+    return true;
+}
+
+String getDayName(int dayOffset) {
+    const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    int dayIndex = (timeinfo->tm_wday + dayOffset) % 7;
+    return String(days[dayIndex]);
+}
