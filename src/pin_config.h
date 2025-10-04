@@ -1,7 +1,7 @@
 #pragma once
 
-#define WIFI_SSID                    "JFTM"
-#define WIFI_PASSWORD                "howdyhowdyhowdy"
+#define WIFI_SSID                    "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD                "YOUR_WIFI_PASSWORD"
 
 #define WIFI_CONNECT_WAIT_MAX        (30 * 1000)
 

@@ -13,6 +13,8 @@ A beautiful, real-time weather display showing current conditions and 3-day fore
 - ⚠️ **Stale Data Warning** - Red asterisk if data is >2 hours old
 - 🎨 **Clean UI** - Horizontal tile layout with optimized fonts
 - 📱 **WiFi Connected** - Automatic connection on startup
+- 🌍 **Automatic Timezone** - Detects timezone from location coordinates
+- 📅 **Smart Day Names** - Accurate day-of-week that updates properly
 
 ## Display Layout
 
@@ -249,7 +251,15 @@ This project is open source and available under the MIT License.
 
 ## Changelog
 
-### v1.1.0 (Current)
+### v1.2.0 (Current)
+- **Added**: Automatic timezone detection from API (works worldwide!)
+- **Fixed**: Day-of-week now calculated from actual dates (updates properly)
+- **Fixed**: All forecast times converted to local timezone
+- **Fixed**: Today's high/low now uses actual forecast data
+- **Improved**: NTP syncs to UTC, timezone offset applied from API
+- **Note**: No more hardcoded PST - adapts to any location globally
+
+### v1.1.0
 - **Fixed**: Coordinate-based location for precise weather data
 - **Fixed**: Proper calendar-day grouping for forecasts
 - **Fixed**: Current temperature now uses forecast API (more reliable for small towns)

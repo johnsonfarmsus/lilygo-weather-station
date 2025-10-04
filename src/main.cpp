@@ -42,6 +42,7 @@ int currentTemp = 0;  // Current temperature for Day 0
 String currentCondition = "";  // Current weather condition for Day 0
 unsigned long lastUpdate = 0;
 bool weatherDataValid = false;
+long timezoneOffset = 0;  // Timezone offset in seconds from UTC (from API)
 
 // LVGL UI objects
 lv_obj_t *screen;
@@ -81,7 +82,7 @@ bool connectToWiFi();
 bool fetchWeatherData();
 void createUI();
 void updateWeatherDisplay();
-String getDayName(int dayOffset);
+String getDayName(const String& dateStr);
 static bool lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
 static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map);
 
@@ -108,11 +109,27 @@ void setup() {
     // Connect to WiFi
     if (connectToWiFi()) {
         Serial.println("WiFi connected!");
+        
+        // Configure NTP for UTC time (we'll apply timezone offset from API)
+        lv_label_set_text(title_label, "Syncing Time...");
+        lv_timer_handler();
+        configTime(0, 0, NTP_SERVER1, NTP_SERVER2);  // UTC timezone
+        
+        // Wait for time sync
+        Serial.println("Waiting for NTP time sync...");
+        int timeWait = 0;
+        while (time(nullptr) < 100000 && timeWait < 20) {
+            delay(500);
+            Serial.print(".");
+            timeWait++;
+        }
+        Serial.println("\nTime synced!");
+        
         lv_label_set_text(title_label, "Fetching Weather...");
         lv_timer_handler();
         delay(1000);
         
-        // Fetch weather
+        // Fetch weather (this will also get timezone offset from API)
         if (fetchWeatherData()) {
             weatherDataValid = true;
             updateWeatherDisplay();
@@ -424,6 +441,10 @@ bool fetchWeatherData() {
         return false;
     }
     
+    // Get timezone offset from API (in seconds from UTC)
+    timezoneOffset = doc["city"]["timezone"].as<long>();
+    Serial.printf("Timezone offset from API: %ld seconds (%d hours)\n", timezoneOffset, (int)(timezoneOffset / 3600));
+    
     // Get the first forecast entry temperature (most recent/next 3-hour block)
     int firstForecastTemp = round(doc["list"][0]["main"]["temp"].as<float>());
     Serial.printf("First Forecast Entry: %dF\n", firstForecastTemp);
@@ -434,11 +455,13 @@ bool fetchWeatherData() {
     // Process forecast data - group by actual calendar date
     Serial.println("Processing forecast by calendar date...");
     
-    // Get current date to properly group forecasts
+    // Get current local date using timezone offset from API
     time_t now = time(nullptr);
-    struct tm* timeinfo = localtime(&now);
+    time_t localTime = now + timezoneOffset;
+    struct tm* timeinfo = gmtime(&localTime);
     char currentDate[11];
     strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", timeinfo);
+    Serial.printf("Local date for grouping: %s (UTC+%d)\n", currentDate, (int)(timezoneOffset / 3600));
     
     // Arrays to hold min/max for each of 3 days
     float dayHighs[3] = {-999, -999, -999};
@@ -452,23 +475,31 @@ bool fetchWeatherData() {
     int listSize = doc["list"].size();
     for (int i = 0; i < listSize; i++) {
         JsonObject item = doc["list"][i];
-        String dt_txt = item["dt_txt"].as<String>();  // Format: "YYYY-MM-DD HH:MM:SS"
-        String forecastDate = dt_txt.substring(0, 10);  // Extract "YYYY-MM-DD"
-        String forecastTime = dt_txt.substring(11, 16); // Extract "HH:MM"
+        
+        // Get Unix timestamp (in UTC) and convert to local time using API timezone offset
+        long dt = item["dt"].as<long>();
+        time_t forecast_time = (time_t)(dt + timezoneOffset);
+        
+        // Convert to local date string
+        struct tm* forecast_tm = gmtime(&forecast_time);
+        char forecastDate[11];
+        strftime(forecastDate, sizeof(forecastDate), "%Y-%m-%d", forecast_tm);
+        char forecastTime[6];
+        strftime(forecastTime, sizeof(forecastTime), "%H:%M", forecast_tm);
         
         // Determine which day this forecast belongs to (0=today, 1=tomorrow, 2=day after)
         int dayIndex = -1;
         
         // Compare dates to determine day index
-        if (forecastDate == currentDate) {
+        if (strcmp(forecastDate, currentDate) == 0) {
             dayIndex = 0;  // Today
-        } else if (dayDates[1] == "" || forecastDate == dayDates[1]) {
+        } else if (dayDates[1] == "" || dayDates[1] == forecastDate) {
             dayIndex = 1;  // Tomorrow
             if (dayDates[1] == "") dayDates[1] = forecastDate;
-        } else if (dayDates[2] == "" || forecastDate == dayDates[2]) {
+        } else if (dayDates[2] == "" || dayDates[2] == forecastDate) {
             dayIndex = 2;  // Day after tomorrow
             if (dayDates[2] == "") dayDates[2] = forecastDate;
-        } else if (dayIndex == -1) {
+        } else {
             continue;  // Skip if beyond 3 days
         }
         
@@ -492,7 +523,7 @@ bool fetchWeatherData() {
         
         // Use midday description (12:00-15:00 preferred)
         if (dayDescriptions[dayIndex] == "" || 
-            (forecastTime >= "12:00" && forecastTime <= "15:00")) {
+            (strcmp(forecastTime, "12:00") >= 0 && strcmp(forecastTime, "15:00") <= 0)) {
             dayDescriptions[dayIndex] = item["weather"][0]["description"].as<String>();
         }
     }
@@ -500,18 +531,42 @@ bool fetchWeatherData() {
     // Populate forecast array with processed data
     dayDates[0] = currentDate;  // Ensure today is set
     for (int day = 0; day < 3; day++) {
-        forecast[day].day_name = getDayName(day);
+        forecast[day].day_name = getDayName(dayDates[day]);
         forecast[day].date = dayDates[day].substring(5, 10);  // "MM-DD"
         forecast[day].description = dayDescriptions[day];
         
-        // Don't show high/low if we don't have forecast data (late in the day)
+        // Handle missing or partial forecast data
         if (dayHighs[day] <= -999 || dayLows[day] >= 999) {
-            Serial.printf("No forecast data remaining for day %d\n", day);
-            forecast[day].temp_high = 0;
-            forecast[day].temp_low = 0;
+            Serial.printf("No forecast data for day %d\n", day);
+            // For today (day 0), if we have no forecast entries remaining,
+            // treat current temp as the high since it's likely late in the day
+            if (day == 0) {
+                forecast[day].temp_high = currentTemp;
+                forecast[day].temp_low = currentTemp;
+                Serial.printf("Late in day - using current temp for day 0: %d/%dF\n", currentTemp, currentTemp);
+            } else {
+                // For future days, show 0/0 to indicate no data
+                forecast[day].temp_high = 0;
+                forecast[day].temp_low = 0;
+            }
         } else {
+            // We have forecast data - use it
             forecast[day].temp_high = round(dayHighs[day]);
             forecast[day].temp_low = round(dayLows[day]);
+            
+            // Special handling for Day 0: if current temp is higher than forecast high,
+            // use current temp as the high (in case we're past the forecasted peak)
+            if (day == 0 && currentTemp > forecast[day].temp_high) {
+                Serial.printf("Current temp (%dF) exceeds forecast high (%dF), using current as high\n", 
+                             currentTemp, forecast[day].temp_high);
+                forecast[day].temp_high = currentTemp;
+            }
+            // Similarly, if current temp is lower than forecast low, use current as low
+            if (day == 0 && currentTemp < forecast[day].temp_low) {
+                Serial.printf("Current temp (%dF) below forecast low (%dF), using current as low\n", 
+                             currentTemp, forecast[day].temp_low);
+                forecast[day].temp_low = currentTemp;
+            }
         }
         
         forecast[day].humidity = dayHumidityCounts[day] > 0 ? 
@@ -527,10 +582,24 @@ bool fetchWeatherData() {
     return true;
 }
 
-String getDayName(int dayOffset) {
+String getDayName(const String& dateStr) {
+    // dateStr format: "YYYY-MM-DD"
     const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    time_t now = time(nullptr);
-    struct tm* timeinfo = localtime(&now);
-    int dayIndex = (timeinfo->tm_wday + dayOffset) % 7;
-    return String(days[dayIndex]);
+    
+    // Parse the date string
+    int year = dateStr.substring(0, 4).toInt();
+    int month = dateStr.substring(5, 7).toInt();
+    int day = dateStr.substring(8, 10).toInt();
+    
+    // Create tm struct
+    struct tm timeinfo = {0};
+    timeinfo.tm_year = year - 1900;
+    timeinfo.tm_mon = month - 1;
+    timeinfo.tm_mday = day;
+    
+    // Convert to time_t and back to get day of week
+    time_t timestamp = mktime(&timeinfo);
+    struct tm* result = localtime(&timestamp);
+    
+    return String(days[result->tm_wday]);
 }

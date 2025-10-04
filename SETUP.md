@@ -69,6 +69,7 @@ Edit `src/main.cpp` (lines 14-17):
 - More accurate than city names, especially for small towns
 - No ambiguity (many cities share the same name)
 - Better data quality from OpenWeatherMap
+- **Automatic timezone detection** - The device automatically determines your timezone from the coordinates!
 
 ## Step 4: Connect and Upload
 
