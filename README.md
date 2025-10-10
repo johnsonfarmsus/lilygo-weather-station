@@ -2,7 +2,7 @@
 
 A beautiful, real-time weather display showing current conditions and 3-day forecast for any location using the LilyGo T-Display S3 and OpenWeatherMap API.
 
-![T-Display S3 Weather Station](https://img.shields.io/badge/Platform-ESP32--S3-blue) ![License](https://img.shields.io/badge/License-MIT-green)
+![T-Display S3 Weather Station](https://img.shields.io/badge/Platform-ESP32--S3-blue)
 
 ## Features
 
