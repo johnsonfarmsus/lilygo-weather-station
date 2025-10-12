@@ -53,8 +53,7 @@ struct Location {
 };
 
 Location currentLocation = {0.0, 0.0, "", 0, false};
-const unsigned long LOCATION_UPDATE_INTERVAL = (2 * 60 * 60 * 1000); // Check every 2 hours
-const float LOCATION_CHANGE_THRESHOLD_KM = 5.0; // Update weather if moved >5km
+const float LOCATION_CHANGE_THRESHOLD_KM = 5.0; // Only update weather if moved >5km
 
 // LVGL UI objects
 lv_obj_t *screen;
@@ -101,7 +100,6 @@ static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
 // Location and security functions
 void validateAPIKeys();
 bool getLocationFromWiFi();
-bool shouldUpdateLocation();
 float calculateDistance(float lat1, float lon1, float lat2, float lon2);
 bool locationChanged(float newLat, float newLon);
 
@@ -195,31 +193,32 @@ void loop() {
     lv_timer_handler();
     delay(5);
 
-    // Check if we should update location (every 2 hours)
-    if (shouldUpdateLocation()) {
-        Serial.println("\n--- Periodic Location Check ---");
-        Serial.println("Checking if location has changed...");
+    // Update weather every 30 minutes
+    // Check location BEFORE each weather update
+    if (weatherDataValid && millis() - lastUpdate > UPDATE_INTERVAL_MS) {
+        Serial.println("\n--- Periodic Weather Update ---");
+        Serial.println("Checking location before weather update...");
 
+        // Triangulate to see if location changed
         if (getLocationFromWiFi()) {
-            Serial.println("Location changed significantly! Updating weather...");
-            // Force immediate weather update when location changes
+            Serial.println("Location changed significantly! Updating weather for new location...");
+            // Location changed >5km, fetch weather for new location
             if (fetchWeatherData()) {
                 updateWeatherDisplay();
                 Serial.println("✓ Weather updated for new location\n");
+            } else {
+                Serial.println("✗ Weather update failed\n");
             }
         } else {
-            Serial.println("Location unchanged or check failed\n");
-        }
-    }
-
-    // Update weather every 30 minutes (normal periodic update)
-    if (weatherDataValid && millis() - lastUpdate > UPDATE_INTERVAL_MS) {
-        Serial.println("\n--- Periodic Weather Update ---");
-        if (fetchWeatherData()) {
-            updateWeatherDisplay();
-            Serial.println("✓ Weather data refreshed\n");
-        } else {
-            Serial.println("✗ Weather update failed\n");
+            // Location unchanged (<5km difference) or triangulation returned false
+            // Still update weather for current location
+            Serial.println("Location unchanged. Refreshing weather for current location...");
+            if (fetchWeatherData()) {
+                updateWeatherDisplay();
+                Serial.println("✓ Weather data refreshed\n");
+            } else {
+                Serial.println("✗ Weather update failed\n");
+            }
         }
     }
 }
@@ -819,17 +818,6 @@ bool getLocationFromWiFi() {
 
         return false;
     }
-}
-
-bool shouldUpdateLocation() {
-    // If we don't have a valid location yet, we should definitely update
-    if (!currentLocation.isValid) {
-        return true;
-    }
-
-    // Check if it's been long enough since last location check
-    unsigned long timeSinceLastCheck = millis() - currentLocation.lastLocationCheck;
-    return (timeSinceLastCheck >= LOCATION_UPDATE_INTERVAL);
 }
 
 float calculateDistance(float lat1, float lon1, float lat2, float lon2) {
