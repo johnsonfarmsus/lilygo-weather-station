@@ -777,7 +777,8 @@ bool getLocationFromWiFi() {
         float newLat = loc.lat;
         float newLon = loc.lon;
 
-        Serial.printf("Location found: %f, %f (accuracy: %.0fm)\n",
+        Serial.println("✓ WiFi TRIANGULATION SUCCESSFUL!");
+        Serial.printf("   Location: %f, %f (accuracy: %.0fm)\n",
                      newLat, newLon, loc.accuracy);
 
         // Check if location changed significantly
@@ -795,7 +796,8 @@ bool getLocationFromWiFi() {
 
         return true; // Location updated successfully
     } else {
-        Serial.println("WiFi geolocation failed!");
+        Serial.println("✗ WiFi TRIANGULATION FAILED!");
+        Serial.printf("   API returned accuracy: %.0fm (need >0 for success)\n", loc.accuracy);
 
         // Try fallback location
         #ifdef FALLBACK_LATITUDE
@@ -803,12 +805,12 @@ bool getLocationFromWiFi() {
         if (!currentLocation.isValid &&
             strcmp(FALLBACK_LATITUDE, "your_latitude_here") != 0 &&
             strcmp(FALLBACK_LONGITUDE, "your_longitude_here") != 0) {
-            Serial.println("Using fallback location...");
+            Serial.println("→ USING FALLBACK LOCATION (from secrets.h)");
             currentLocation.latitude = String(FALLBACK_LATITUDE).toFloat();
             currentLocation.longitude = String(FALLBACK_LONGITUDE).toFloat();
             currentLocation.lastLocationCheck = millis();
             currentLocation.isValid = true;
-            Serial.printf("Fallback location: %f, %f\n",
+            Serial.printf("   Fallback coordinates: %f, %f\n",
                          currentLocation.latitude, currentLocation.longitude);
             return true;
         }
