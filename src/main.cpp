@@ -553,7 +553,7 @@ bool fetchWeatherData() {
         JsonObject item = doc["list"][i];
         
         // Get Unix timestamp (in UTC) and convert to local time using API timezone offset
-        long dt = item["dt"].as<long>();
+        int64_t dt = item["dt"].as<int64_t>();
         time_t forecast_time = (time_t)(dt + timezoneOffset);
         
         // Convert to local date string
